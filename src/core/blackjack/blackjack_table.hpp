@@ -1,56 +1,51 @@
-#ifndef BLACKJACK_TABLE_HPP
-#define BLACKJACK_TABLE_HPP
+#pragma once
 
-#include "core/table/itable.hpp"
-#include "blackjack_action.hpp"
+#include "blackjack_observer.hpp"
+#include "blackjack_player.hpp"
+#include "core/table/table.hpp"
 #include <map>
 
 enum class BlackjackState {
-    WaitingForPlayers,
-    PlayerTurns,
-    CrupierTurn,
-    Resolving,
-    HandComplete
+	WaitingForPlayers,
+	PlayerTurns,
+	DealerTurn,
+	Resolving,
+	HandComplete
 };
 
-class BlackjackTable : public ITable {
-  public:
-    BlackjackTable();
-    ~BlackjackTable();
+class BlackjackTable : public Table<BlackjackPlayer, BlackjackObserver> {
+public:
+	BlackjackTable(int minBet = 10, int maxBet = 500);
 
-    void deal() override;
-    void collectCards() override;
+	void playHand() override;
 
-    void playHand(int minBet = 10, int maxBet = 500);
+	BlackjackState getState() const { return state; }
 
-    bool placeBet(IPlayer& player, int amount);
-    void hitPlayer(IPlayer& player);
-    void standPlayer();
-    void playCrupierTurn();
+private:
+	void collectBets();
+	void collectBet(BlackjackPlayer& player);
+	BlackjackBetContext buildBetContext(const Player& player) const;
+	void deal();
+	void announceDeal();
+	void playPlayerTurns();
+	void playTurn(BlackjackPlayer& player);
+	void applyAction(
+			BlackjackPlayer& player, BlackjackAction action, bool canDoubleDown
+	);
+	void doubleDown(BlackjackPlayer& player, bool allowed);
+	void hitCurrentPlayer();
+	void standCurrentPlayer();
+	void advancePlayer();
+	BlackjackPlayer* getCurrentPlayer() const;
+	BlackjackContext buildContext(const BlackjackPlayer& player) const;
+	void playDealerTurn();
+	void announceDealerResult(int dealerTotal);
+	void settleBets();
+	void collectCards();
 
-    int getHandValue(const IPlayer& player) const;
-    bool isBust(const IPlayer& player) const;
-    bool isBlackjack(const IPlayer& player) const;
-
-    BlackjackState getState() const;
-    const char* getStateName() const;
-    IPlayer* getCurrentPlayer() const;
-
-    const std::map<IPlayer*, int>& getBets() const;
-    const Crupier& getCrupier() const;
-    int getCurrentPlayerIndex() const;
-
-  private:
-    BlackjackState state;
-    int currentPlayerIndex;
-    std::map<IPlayer*, int> bets;
-
-    void advancePlayer();
-    void resolve();
-    bool hasSoftAce(const IPlayer& player) const;
-    int getDealerUpcard() const;
-    BlackjackContext buildContext(IPlayer& player) const;
-    static std::string showCards(const IPlayer& player);
+	int minBet;
+	int maxBet;
+	BlackjackState state = BlackjackState::WaitingForPlayers;
+	size_t currentPlayerIndex = 0;
+	std::map<const Player*, int> bets;
 };
-
-#endif

@@ -1,155 +1,175 @@
-#ifndef TEST_HELPERS_HPP
-#define TEST_HELPERS_HPP
+#pragma once
 
-#include "core/common/iplayer.hpp"
-#include "core/common/game_observer.hpp"
-#include "core/poker/poker_action.hpp"
-#include "core/poker/betting_context.hpp"
-#include "core/blackjack/blackjack_action.hpp"
+#include "core/blackjack/blackjack_observer.hpp"
+#include "core/blackjack/blackjack_player.hpp"
+#include "core/common/text.hpp"
+#include "core/poker/poker_observer.hpp"
+#include "core/poker/poker_player.hpp"
+#include <algorithm>
 #include <queue>
 #include <string>
 #include <vector>
 
-class ScriptedPlayer : public IPlayer {
-  public:
-    ScriptedPlayer(const std::string& playerName, int initialChips) {
-        name = playerName;
-        chips = initialChips;
-    }
+template <class T>
+T popOr(std::queue<T>& queue, T fallback) {
+	if (queue.empty()) return fallback;
+	T front = queue.front();
+	queue.pop();
+	return front;
+}
 
-    void queuePokerAction(PokerAction a) { pokerActions.push(a); }
-    void queueBlackjackAction(BlackjackAction a) { bjActions.push(a); }
-    void queueBlackjackBet(int bet) { bjBets.push(bet); }
+class ScriptedPlayer : public PokerPlayer, public BlackjackPlayer {
+public:
+	ScriptedPlayer(const std::string& name, int chips) : Player(name, chips) {}
+	void queuePokerAction(PokerAction action) { pokerActions.push(action); }
+	void queueBlackjackAction(BlackjackAction a) { blackjackActions.push(a); }
+	void queueBlackjackBet(int bet) { blackjackBets.push(bet); }
 
-    PokerAction decideAction(const BettingContext&) override {
-        if (pokerActions.empty()) return PokerAction::fold();
-        PokerAction a = pokerActions.front();
-        pokerActions.pop();
-        return a;
-    }
+	PokerAction decidePokerAction(const BettingContext&) override {
+		return popOr(pokerActions, PokerAction::fold());
+	}
 
-    BlackjackAction decideBlackjackPlay(const BlackjackContext&) override {
-        if (bjActions.empty()) return BlackjackAction::stand();
-        BlackjackAction a = bjActions.front();
-        bjActions.pop();
-        return a;
-    }
+	BlackjackAction decideBlackjackAction(const BlackjackContext&) override {
+		return popOr(blackjackActions, BlackjackAction::stand());
+	}
 
-    int decideBlackjackBet(const BlackjackBetContext& context) override {
-        if (bjBets.empty()) return context.minBet;
-        int bet = bjBets.front();
-        bjBets.pop();
-        return bet;
-    }
+	int decideBlackjackBet(const BlackjackBetContext& context) override {
+		return popOr(blackjackBets, context.minBet);
+	}
 
-  private:
-    std::queue<PokerAction> pokerActions;
-    std::queue<BlackjackAction> bjActions;
-    std::queue<int> bjBets;
+private:
+	std::queue<PokerAction> pokerActions;
+	std::queue<BlackjackAction> blackjackActions;
+	std::queue<int> blackjackBets;
 };
 
 struct RecordedEvent {
-    std::string type;
-    std::string detail;
-    int amount = 0;
+	std::string type;
+	std::string detail;
+	int amount = 0;
 };
 
-class RecordingObserver : public IGameObserver {
-  public:
-    std::vector<RecordedEvent> events;
+class RecordingObserver : public PokerObserver, public BlackjackObserver {
+public:
+	std::vector<RecordedEvent> events;
 
-    void onHandStarted(const std::string& dealer, int sb, int bb) override {
-        events.push_back({"HandStarted", dealer, sb});
-    }
-    void onPlayerCards(const std::string& player, const std::string& c1, const std::string& c2) override {
-        events.push_back({"PlayerCards", player + ": " + c1 + " " + c2, 0});
-    }
-    void onBlindsPosted(const std::string& player, int amount, const std::string& blindType, int, int) override {
-        events.push_back({"BlindsPosted", player + " " + blindType, amount});
-    }
-    void onPhaseChanged(const std::string& phase, const std::string& cards) override {
-        events.push_back({"PhaseChanged", phase, 0});
-    }
-    void onPlayerAction(const std::string& player, const std::string& action, int amount, int, int) override {
-        events.push_back({"PlayerAction", player + " " + action, amount});
-    }
-    void onPotWon(const std::string& winner, int amount, const std::string& rank) override {
-        events.push_back({"PotWon", winner + " " + rank, amount});
-    }
-    void onSplitPot(const std::vector<std::string>& winners, int share, const std::string& rank) override {
-        std::string names;
-        for (size_t i = 0; i < winners.size(); i++) {
-            if (i > 0) names += ",";
-            names += winners[i];
-        }
-        events.push_back({"SplitPot", names + " " + rank, share});
-    }
-    void onShowdownReveal(const std::string& player, const std::string& cards, const std::string& rank) override {
-        events.push_back({"ShowdownReveal", player + " " + rank, 0});
-    }
-    void onShowdownBegin(const std::string& cards) override {
-        events.push_back({"ShowdownBegin", cards, 0});
-    }
-    void onBetPlaced(const std::string& player, int amount) override {
-        events.push_back({"BetPlaced", player, amount});
-    }
-    void onDealingStarted() override {
-        events.push_back({"DealingStarted", "", 0});
-    }
-    void onPlayerDealt(const std::string& player, const std::string& cards, int value) override {
-        events.push_back({"PlayerDealt", player, value});
-    }
-    void onDealerDealt(const std::string& card) override {
-        events.push_back({"DealerDealt", card, 0});
-    }
-    void onPlayerHit(const std::string& player, const std::string& cards, int value) override {
-        events.push_back({"PlayerHit", player, value});
-    }
-    void onPlayerStand(const std::string& player, int value) override {
-        events.push_back({"PlayerStand", player, value});
-    }
-    void onPlayerBust(const std::string& player) override {
-        events.push_back({"PlayerBust", player, 0});
-    }
-    void onPlayerDoubleDown(const std::string& player, int newBet) override {
-        events.push_back({"PlayerDoubleDown", player, newBet});
-    }
-    void onDealerReveals(const std::string& cards, int value) override {
-        events.push_back({"DealerReveals", cards, value});
-    }
-    void onDealerHits(const std::string& cards, int value) override {
-        events.push_back({"DealerHits", cards, value});
-    }
-    void onDealerBust() override {
-        events.push_back({"DealerBust", "", 0});
-    }
-    void onDealerStand(int value) override {
-        events.push_back({"DealerStand", "", value});
-    }
-    void onBlackjackResult(const std::string& player, const std::string& outcome, int chips) override {
-        events.push_back({"BlackjackResult", player + " " + outcome, chips});
-    }
-    void onPlayerBustedOut(const std::string& player) override {
-        events.push_back({"PlayerBustedOut", player, 0});
-    }
-    void onError(const std::string& message) override {
-        events.push_back({"Error", message, 0});
-    }
+	bool hasEvent(const std::string& type) const { return countEvents(type) > 0; }
 
-    bool hasEvent(const std::string& type) const {
-        for (const auto& e : events) {
-            if (e.type == type) return true;
-        }
-        return false;
-    }
+	int countEvents(const std::string& type) const {
+		return std::count_if(events.begin(), events.end(), [&](const auto& e) {
+			return e.type == type;
+		});
+	}
 
-    int countEvents(const std::string& type) const {
-        int count = 0;
-        for (const auto& e : events) {
-            if (e.type == type) count++;
-        }
-        return count;
-    }
+	void onHandStarted(const Player& button, int small, int) override {
+		events.push_back({"HandStarted", button.getName(), small});
+	}
+
+	void onHoleCardsDealt(const Player& player) override {
+		std::string cards = formatCards(player.getHand());
+		events.push_back({"PlayerCards", player.getName() + ": " + cards});
+	}
+
+	void onBlindPosted(
+			const Player& player, int amount, const std::string& blind, int
+	) override {
+		events.push_back({"BlindsPosted", player.getName() + " " + blind, amount});
+	}
+
+	void onStreetStarted(const std::string& street, const Cards&) override {
+		events.push_back({"PhaseChanged", street});
+	}
+
+	void onPlayerAction(
+			const Player& player, const PokerAction& action, int
+	) override {
+		std::string detail = player.getName() + " " + action.getActionName();
+		events.push_back({"PlayerAction", detail, action.amount});
+	}
+
+	void onPotWon(
+			const Player& winner, int amount, const std::string& reason
+	) override {
+		events.push_back({"PotWon", winner.getName() + " " + reason, amount});
+	}
+
+	void onSplitPot(
+			const std::vector<const Player*>& winners, int share,
+			const std::string& hand
+	) override {
+		std::vector<std::string> names;
+		for (const Player* winner : winners) {
+			names.push_back(winner->getName());
+		}
+		events.push_back({"SplitPot", join(names, ",") + " " + hand, share});
+	}
+
+	void onShowdownReveal(
+			const Player& player, const std::string& hand
+	) override {
+		events.push_back({"ShowdownReveal", player.getName() + " " + hand});
+	}
+
+	void onShowdownBegin(const Cards& cards) override {
+		events.push_back({"ShowdownBegin", formatCards(cards)});
+	}
+
+	void onBetPlaced(const Player& player, int amount) override {
+		events.push_back({"BetPlaced", player.getName(), amount});
+	}
+
+	void onDealingStarted() override { events.push_back({"DealingStarted"}); }
+
+	void onPlayerDealt(const Player& player, int total) override {
+		events.push_back({"PlayerDealt", player.getName(), total});
+	}
+
+	void onDealerDealt(const CardHolder& dealer) override {
+		events.push_back({"DealerDealt", dealer.getHand().front().toString()});
+	}
+
+	void onPlayerHit(const Player& player, int total) override {
+		events.push_back({"PlayerHit", player.getName(), total});
+	}
+
+	void onPlayerStand(const Player& player, int total) override {
+		events.push_back({"PlayerStand", player.getName(), total});
+	}
+
+	void onPlayerBust(const Player& player) override {
+		events.push_back({"PlayerBust", player.getName()});
+	}
+
+	void onPlayerDoubleDown(const Player& player, int newBet) override {
+		events.push_back({"PlayerDoubleDown", player.getName(), newBet});
+	}
+
+	void onDealerReveals(const CardHolder& dealer, int total) override {
+		events.push_back({"DealerReveals", formatCards(dealer.getHand()), total});
+	}
+
+	void onDealerHits(const CardHolder& dealer, int total) override {
+		events.push_back({"DealerHits", formatCards(dealer.getHand()), total});
+	}
+
+	void onDealerBust() override { events.push_back({"DealerBust"}); }
+
+	void onDealerStand(int total) override {
+		events.push_back({"DealerStand", "", total});
+	}
+
+	void onBetSettled(
+			const Player& player, const std::string& outcome, int delta
+	) override {
+		std::string detail = player.getName() + " " + outcome;
+		events.push_back({"BlackjackResult", detail, delta});
+	}
+
+	void onPlayerBustedOut(const Player& player) override {
+		events.push_back({"PlayerBustedOut", player.getName()});
+	}
+
+	void onError(const std::string& message) override {
+		events.push_back({"Error", message});
+	}
 };
-
-#endif

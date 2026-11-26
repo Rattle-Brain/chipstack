@@ -1,21 +1,18 @@
-#ifndef THINKING_DELAY_HPP
-#define THINKING_DELAY_HPP
+#pragma once
 
+#include "random_source.hpp"
 #include <chrono>
-#include <random>
 
 class ThinkingDelay {
-  public:
-    ThinkingDelay(bool enabled = true);
+public:
+	explicit ThinkingDelay(bool enabled = true) : enabled(enabled) {}
 
-    std::chrono::milliseconds generate();
+	std::chrono::milliseconds generate();
 
-    void setEnabled(bool enabled) { enabled_ = enabled; }
-    bool isEnabled() const { return enabled_; }
+	void setEnabled(bool isEnabled) { enabled = isEnabled; }
+	bool isEnabled() const { return enabled; }
 
-  private:
-    bool enabled_;
-    std::mt19937 rng_;
+private:
+	bool enabled;
+	RandomSource random;
 };
-
-#endif

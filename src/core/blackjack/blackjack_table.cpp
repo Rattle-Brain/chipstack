@@ -1,349 +1,195 @@
 #include "blackjack_table.hpp"
+#include "blackjack_rules.hpp"
 
-BlackjackTable::BlackjackTable() : state(BlackjackState::WaitingForPlayers), currentPlayerIndex(0) {}
+using namespace BlackjackRules;
 
-BlackjackTable::~BlackjackTable() {}
+BlackjackTable::BlackjackTable(int minBet, int maxBet)
+		: minBet(minBet), maxBet(std::max(minBet, maxBet)) {}
 
-int BlackjackTable::getHandValue(const IPlayer& player) const {
-  const std::vector<Card>& hand = player.getHand();
-  int total = 0;
-  int aces = 0;
-  for (size_t i = 0; i < hand.size(); i++) {
-    int rank = hand[i].getRank();
-    if (rank == 14) {
-      total += 11;
-      aces++;
-    } else if (rank >= 11) {
-      total += 10;
-    } else {
-      total += rank;
-    }
-  }
-  while (total > 21 && aces > 0) {
-    total -= 10;
-    aces--;
-  }
-  return total;
+void BlackjackTable::playHand() {
+	if (players.empty()) {
+		reportError("Cannot play: no players at the table");
+		return;
+	}
+	collectBets();
+	observer->onDealingStarted();
+	deal();
+	playPlayerTurns();
+	playDealerTurn();
+	settleBets();
+	collectCards();
 }
 
-bool BlackjackTable::isBust(const IPlayer& player) const {
-  return getHandValue(player) > 21;
+void BlackjackTable::collectBets() {
+	for (BlackjackPlayer* player : players) {
+		collectBet(*player);
+	}
 }
 
-bool BlackjackTable::isBlackjack(const IPlayer& player) const {
-  return player.getHand().size() == 2 && getHandValue(player) == 21;
+void BlackjackTable::collectBet(BlackjackPlayer& player) {
+	BlackjackBetContext context = buildBetContext(player);
+	observer->onBeforeDecision(player);
+	int requested = player.decideBlackjackBet(context);
+	int bet = std::clamp(requested, context.minBet, context.maxBet);
+	player.placeBet(bet);
+	bets[&player] = bet;
+	observer->onBetPlaced(player, bet);
 }
 
-bool BlackjackTable::placeBet(IPlayer& player, int amount) {
-  if (!player.placeBet(amount)) {
-    if (observer_) observer_->onError(player.getName() + " cannot bet " +
-        std::to_string(amount) + " (has " + std::to_string(player.getChips()) + " chips)");
-    return false;
-  }
-  bets[&player] = amount;
-  return true;
+BlackjackBetContext BlackjackTable::buildBetContext(
+		const Player& player
+) const {
+	int chips = player.getChips();
+	return {chips, std::min(minBet, chips), std::min(maxBet, chips)};
 }
 
 void BlackjackTable::deal() {
-  if (state != BlackjackState::WaitingForPlayers && state != BlackjackState::HandComplete) {
-    if (observer_) observer_->onError("Cannot deal: hand already in progress");
-    return;
-  }
-  if (players.empty()) {
-    if (observer_) observer_->onError("Cannot deal: no players at the table");
-    return;
-  }
-  crupier.shuffleDeck();
-  for (int round = 0; round < 2; round++) {
-    for (size_t i = 0; i < players.size(); i++) {
-      crupier.dealCard(*players[i]);
-    }
-    crupier.dealCard(crupier);
-  }
-  currentPlayerIndex = 0;
-  state = BlackjackState::PlayerTurns;
-
-  for (size_t i = 0; i < players.size(); i++) {
-    if (observer_) observer_->onPlayerDealt(players[i]->getName(),
-        showCards(*players[i]), getHandValue(*players[i]));
-  }
-  const std::vector<Card>& crupierHand = crupier.getHand();
-  if (observer_) observer_->onDealerDealt(crupierHand[0].toString());
+	dealer.shuffleDeck();
+	for (int round = 0; round < 2; round++) {
+		for (BlackjackPlayer* player : players) {
+			dealer.dealTo(*player);
+		}
+		dealer.dealTo(dealer);
+	}
+	currentPlayerIndex = 0;
+	state = BlackjackState::PlayerTurns;
+	announceDeal();
 }
 
-void BlackjackTable::collectCards() {
-  for (size_t i = 0; i < players.size(); i++) {
-    players[i]->clearHand();
-  }
-  crupier.clearHand();
-  crupier.resetDeck();
-  currentPlayerIndex = 0;
-  bets.clear();
-  state = BlackjackState::WaitingForPlayers;
+void BlackjackTable::announceDeal() {
+	for (BlackjackPlayer* player : players) {
+		observer->onPlayerDealt(*player, handTotal(player->getHand()));
+	}
+	observer->onDealerDealt(dealer);
 }
 
-void BlackjackTable::hitPlayer(IPlayer& player) {
-  if (state != BlackjackState::PlayerTurns) {
-    if (observer_) observer_->onError("Cannot hit: not in player turns");
-    return;
-  }
-  if (&player != players[currentPlayerIndex]) {
-    if (observer_) observer_->onError("Cannot hit: not " + player.getName() + "'s turn");
-    return;
-  }
-  crupier.dealCard(player);
-  int value = getHandValue(player);
-  if (observer_) observer_->onPlayerHit(player.getName(), showCards(player), value);
-  if (value > 21) {
-    if (observer_) observer_->onPlayerBust(player.getName());
-    advancePlayer();
-  }
+void BlackjackTable::playPlayerTurns() {
+	while (BlackjackPlayer* player = getCurrentPlayer()) {
+		playTurn(*player);
+	}
 }
 
-void BlackjackTable::standPlayer() {
-  if (state != BlackjackState::PlayerTurns) {
-    if (observer_) observer_->onError("Cannot stand: not in player turns");
-    return;
-  }
-  if (observer_) observer_->onPlayerStand(players[currentPlayerIndex]->getName(),
-      getHandValue(*players[currentPlayerIndex]));
-  advancePlayer();
+void BlackjackTable::playTurn(BlackjackPlayer& player) {
+	while (getCurrentPlayer() == &player) {
+		if (handTotal(player.getHand()) == BLACKJACK) {
+			standCurrentPlayer();
+			return;
+		}
+		observer->onBeforeDecision(player);
+		BlackjackContext context = buildContext(player);
+		BlackjackAction action = player.decideBlackjackAction(context);
+		applyAction(player, action, context.canDoubleDown);
+	}
 }
 
-bool BlackjackTable::hasSoftAce(const IPlayer& player) const {
-    const std::vector<Card>& hand = player.getHand();
-    int total = 0;
-    int aces = 0;
-    for (size_t i = 0; i < hand.size(); i++) {
-        int rank = hand[i].getRank();
-        if (rank == 14) {
-            total += 11;
-            aces++;
-        } else if (rank >= 11) {
-            total += 10;
-        } else {
-            total += rank;
-        }
-    }
-    while (total > 21 && aces > 0) {
-        total -= 10;
-        aces--;
-    }
-    return aces > 0;
+void BlackjackTable::applyAction(
+		BlackjackPlayer& player, BlackjackAction action, bool canDoubleDown
+) {
+	switch (action.type) {
+		case BlackjackActionType::Hit:
+			hitCurrentPlayer();
+			break;
+		case BlackjackActionType::Stand:
+			standCurrentPlayer();
+			break;
+		case BlackjackActionType::DoubleDown:
+			doubleDown(player, canDoubleDown);
+			break;
+	}
 }
 
-int BlackjackTable::getDealerUpcard() const {
-    const std::vector<Card>& hand = crupier.getHand();
-    if (hand.empty()) return 0;
-    int rank = hand[0].getRank();
-    if (rank == 14) return 11;
-    if (rank >= 11) return 10;
-    return rank;
+void BlackjackTable::doubleDown(BlackjackPlayer& player, bool allowed) {
+	int& bet = bets[&player];
+	if (allowed && player.placeBet(bet)) {
+		bet *= 2;
+		observer->onPlayerDoubleDown(player, bet);
+	}
+	hitCurrentPlayer();
+	if (getCurrentPlayer() == &player) standCurrentPlayer();
 }
 
-BlackjackContext BlackjackTable::buildContext(IPlayer& player) const {
-    BlackjackContext ctx;
-    ctx.handValue = getHandValue(player);
-    ctx.numCards = player.getHand().size();
-    ctx.hasSoftAce = hasSoftAce(player);
-    ctx.dealerUpcard = getDealerUpcard();
-    std::map<IPlayer*, int>::const_iterator it = bets.find(&player);
-    ctx.bet = (it != bets.end()) ? it->second : 0;
-    ctx.playerChips = player.getChips();
-    ctx.canDoubleDown = (ctx.numCards == 2 && ctx.playerChips >= ctx.bet);
-    return ctx;
+void BlackjackTable::hitCurrentPlayer() {
+	BlackjackPlayer& player = *players[currentPlayerIndex];
+	dealer.dealTo(player);
+	int total = handTotal(player.getHand());
+	observer->onPlayerHit(player, total);
+	if (total <= BLACKJACK) return;
+	observer->onPlayerBust(player);
+	advancePlayer();
 }
 
-void BlackjackTable::playHand(int minBet, int maxBet) {
-    if (players.empty()) {
-        if (observer_) observer_->onError("Cannot play: no players at the table");
-        return;
-    }
-
-    for (size_t i = 0; i < players.size(); i++) {
-        BlackjackBetContext betCtx;
-        betCtx.playerChips = players[i]->getChips();
-        betCtx.minBet = minBet;
-        betCtx.maxBet = maxBet;
-
-        if (betCtx.playerChips < minBet) {
-            betCtx.minBet = betCtx.playerChips;
-        }
-        if (betCtx.maxBet > betCtx.playerChips) {
-            betCtx.maxBet = betCtx.playerChips;
-        }
-
-        if (preActionCallback) preActionCallback(players[i]);
-
-        int betAmount = players[i]->decideBlackjackBet(betCtx);
-        if (betAmount < betCtx.minBet) betAmount = betCtx.minBet;
-        if (betAmount > betCtx.maxBet) betAmount = betCtx.maxBet;
-
-        placeBet(*players[i], betAmount);
-        if (observer_) observer_->onBetPlaced(players[i]->getName(), betAmount);
-    }
-
-    if (observer_) observer_->onDealingStarted();
-    deal();
-
-    while (state == BlackjackState::PlayerTurns) {
-        IPlayer* current = getCurrentPlayer();
-        if (!current) break;
-
-        while (state == BlackjackState::PlayerTurns &&
-               getCurrentPlayer() == current) {
-            int value = getHandValue(*current);
-            if (value >= 21) {
-                if (value == 21) {
-                    standPlayer();
-                }
-                break;
-            }
-
-            if (preActionCallback) preActionCallback(current);
-
-            BlackjackContext ctx = buildContext(*current);
-            BlackjackAction action = current->decideBlackjackPlay(ctx);
-
-            switch (action.type) {
-                case BlackjackActionType::Hit:
-                    hitPlayer(*current);
-                    break;
-                case BlackjackActionType::Stand:
-                    standPlayer();
-                    break;
-                case BlackjackActionType::DoubleDown: {
-                    std::map<IPlayer*, int>::iterator it = bets.find(current);
-                    if (it != bets.end() && ctx.canDoubleDown) {
-                        int extraBet = it->second;
-                        if (current->placeBet(extraBet)) {
-                            it->second *= 2;
-                            if (observer_) observer_->onPlayerDoubleDown(current->getName(), it->second);
-                        }
-                    }
-                    hitPlayer(*current);
-                    if (state == BlackjackState::PlayerTurns &&
-                        getCurrentPlayer() == current && !isBust(*current)) {
-                        standPlayer();
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    playCrupierTurn();
-    collectCards();
+void BlackjackTable::standCurrentPlayer() {
+	BlackjackPlayer& player = *players[currentPlayerIndex];
+	observer->onPlayerStand(player, handTotal(player.getHand()));
+	advancePlayer();
 }
 
 void BlackjackTable::advancePlayer() {
-  currentPlayerIndex++;
-  if (currentPlayerIndex >= (int)players.size()) {
-    state = BlackjackState::CrupierTurn;
-  }
+	if (++currentPlayerIndex >= players.size()) {
+		state = BlackjackState::DealerTurn;
+	}
 }
 
-void BlackjackTable::playCrupierTurn() {
-  if (state != BlackjackState::CrupierTurn) {
-    if (observer_) observer_->onError("Cannot play crupier turn: wrong state");
-    return;
-  }
-
-  int value = getHandValue(crupier);
-  if (observer_) observer_->onDealerReveals(showCards(crupier), value);
-  if (postPhaseCallback) postPhaseCallback("Dealer reveals hole card...");
-
-  while (value < 17) {
-    crupier.dealCard(crupier);
-    value = getHandValue(crupier);
-    if (observer_) observer_->onDealerHits(showCards(crupier), value);
-    if (postPhaseCallback) postPhaseCallback("Dealer hits...");
-  }
-
-  if (value > 21) {
-    if (observer_) observer_->onDealerBust();
-    if (postPhaseCallback) postPhaseCallback("Dealer busts!");
-  } else {
-    if (observer_) observer_->onDealerStand(value);
-    if (postPhaseCallback) postPhaseCallback("Dealer stands at " + std::to_string(value));
-  }
-
-  resolve();
+BlackjackPlayer* BlackjackTable::getCurrentPlayer() const {
+	bool playersTurn = state == BlackjackState::PlayerTurns
+			&& currentPlayerIndex < players.size();
+	return playersTurn ? players[currentPlayerIndex] : nullptr;
 }
 
-void BlackjackTable::resolve() {
-  state = BlackjackState::Resolving;
-  int crupierValue = getHandValue(crupier);
-  bool crupierBust = crupierValue > 21;
-  bool crupierBJ = isBlackjack(crupier);
-
-  for (size_t i = 0; i < players.size(); i++) {
-    int playerValue = getHandValue(*players[i]);
-    int bet = 0;
-    std::map<IPlayer*, int>::iterator it = bets.find(players[i]);
-    if (it != bets.end()) bet = it->second;
-
-    if (playerValue > 21) {
-      if (observer_) observer_->onBlackjackResult(players[i]->getName(), "BUST", -bet);
-    } else if (isBlackjack(*players[i]) && !crupierBJ) {
-      int winnings = bet * 3 / 2;
-      players[i]->receiveChips(bet + winnings);
-      if (observer_) observer_->onBlackjackResult(players[i]->getName(), "BLACKJACK", winnings);
-    } else if (crupierBust || playerValue > crupierValue) {
-      players[i]->receiveChips(bet * 2);
-      if (observer_) observer_->onBlackjackResult(players[i]->getName(), "WIN", bet);
-    } else if (playerValue == crupierValue) {
-      players[i]->receiveChips(bet);
-      if (observer_) observer_->onBlackjackResult(players[i]->getName(), "PUSH", 0);
-    } else {
-      if (observer_) observer_->onBlackjackResult(players[i]->getName(), "LOSE", -bet);
-    }
-  }
-
-  if (postPhaseCallback) postPhaseCallback("Settling bets...");
-  state = BlackjackState::HandComplete;
+BlackjackContext BlackjackTable::buildContext(
+		const BlackjackPlayer& player
+) const {
+	HandValue value = evaluate(player.getHand());
+	BlackjackContext context;
+	context.handValue = value.total;
+	context.numCards = player.getHand().size();
+	context.hasSoftAce = value.soft;
+	context.dealerUpcard = cardValue(dealer.getHand().front());
+	context.bet = bets.at(&player);
+	context.playerChips = player.getChips();
+	context.canDoubleDown =
+			context.numCards == 2 && context.playerChips >= context.bet;
+	return context;
 }
 
-BlackjackState BlackjackTable::getState() const {
-  return state;
+void BlackjackTable::playDealerTurn() {
+	int total = handTotal(dealer.getHand());
+	observer->onDealerReveals(dealer, total);
+	observer->onAnnouncement("Dealer reveals hole card...");
+	while (total < DEALER_STAND_TOTAL) {
+		dealer.dealTo(dealer);
+		total = handTotal(dealer.getHand());
+		observer->onDealerHits(dealer, total);
+		observer->onAnnouncement("Dealer hits...");
+	}
+	announceDealerResult(total);
 }
 
-const char* BlackjackTable::getStateName() const {
-  switch (state) {
-    case BlackjackState::WaitingForPlayers: return "WaitingForPlayers";
-    case BlackjackState::PlayerTurns: return "PlayerTurns";
-    case BlackjackState::CrupierTurn: return "CrupierTurn";
-    case BlackjackState::Resolving: return "Resolving";
-    case BlackjackState::HandComplete: return "HandComplete";
-  }
-  return "Unknown";
+void BlackjackTable::announceDealerResult(int dealerTotal) {
+	if (dealerTotal > BLACKJACK) {
+		observer->onDealerBust();
+		observer->onAnnouncement("Dealer busts!");
+	} else {
+		observer->onDealerStand(dealerTotal);
+		observer->onAnnouncement("Dealer stands at " + std::to_string(dealerTotal));
+	}
 }
 
-IPlayer* BlackjackTable::getCurrentPlayer() const {
-  if (state != BlackjackState::PlayerTurns || currentPlayerIndex >= (int)players.size()) {
-    return nullptr;
-  }
-  return players[currentPlayerIndex];
+void BlackjackTable::settleBets() {
+	state = BlackjackState::Resolving;
+	for (BlackjackPlayer* player : players) {
+		int bet = bets.at(player);
+		Settlement result = settle(player->getHand(), dealer.getHand(), bet);
+		player->receiveChips(bet + result.chipDelta);
+		observer->onBetSettled(*player, result.outcome, result.chipDelta);
+	}
+	observer->onAnnouncement("Settling bets...");
+	state = BlackjackState::HandComplete;
 }
 
-std::string BlackjackTable::showCards(const IPlayer& player) {
-  const std::vector<Card>& hand = player.getHand();
-  std::string result;
-  for (size_t i = 0; i < hand.size(); i++) {
-    if (i > 0) result += " ";
-    result += hand[i].toString();
-  }
-  return result;
-}
-
-const std::map<IPlayer*, int>& BlackjackTable::getBets() const {
-  return bets;
-}
-
-const Crupier& BlackjackTable::getCrupier() const {
-  return crupier;
-}
-
-int BlackjackTable::getCurrentPlayerIndex() const {
-  return currentPlayerIndex;
+void BlackjackTable::collectCards() {
+	returnCardsToDealer();
+	bets.clear();
+	currentPlayerIndex = 0;
+	state = BlackjackState::WaitingForPlayers;
 }

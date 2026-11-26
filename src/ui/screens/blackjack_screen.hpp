@@ -1,8 +1,5 @@
-#ifndef BLACKJACK_SCREEN_HPP
-#define BLACKJACK_SCREEN_HPP
+#pragma once
 
 struct GameConfig;
 
 bool runBlackjackScreen(const GameConfig& config);
-
-#endif

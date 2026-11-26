@@ -6,7 +6,7 @@ A terminal casino (poker and blackjack) written in C++17 with an [FTXUI](https:/
 
 - CMake 3.14 or newer
 - A C++17 compiler (Clang, GCC or MSVC)
-- Internet access on the first configure: CMake downloads FTXUI and GoogleTest through `FetchContent`
+- Internet access on the first configure: CMake downloads FTXUI through `FetchContent`. GoogleTest is taken from the system when installed, otherwise downloaded too
 
 ## Building
 
@@ -60,3 +60,19 @@ rm -rf CMakeCache.txt CMakeFiles cmake_install.cmake Makefile CTestTestfile.cmak
 ```
 
 A clean rebuild is just `rm -rf build` followed by the build steps above.
+
+## Project layout
+
+- `src/core`: game rules with no UI. `cards`, `players` and `table` are shared; `poker` and `blackjack` never include each other. Each game exposes a player interface (`PokerPlayer`, `BlackjackPlayer`) and an observer (`PokerObserver`, `BlackjackObserver`).
+- `src/ai`: bots. `BotPlayer` implements both game interfaces and delegates to `PokerStrategy` / `BlackjackStrategy`.
+- `src/ui`: FTXUI front end. `screens/game_screen` owns everything both games share (game loop, pause menu, header, log, input routing); `poker_screen` and `blackjack_screen` only add their own rendering and input. New games are registered in `game_catalog.cpp`.
+
+## Code style
+
+Formatting is enforced by `.clang-format` (tabs shown 2 wide, 80 columns) and `.editorconfig`. Format before committing:
+
+```sh
+clang-format -i $(git ls-files '*.cpp' '*.hpp')
+```
+
+In vim without an EditorConfig plugin: `:set noexpandtab tabstop=2 shiftwidth=2`.

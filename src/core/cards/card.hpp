@@ -1,33 +1,35 @@
-#ifndef CARD_HPP
-#define CARD_HPP
+#pragma once
 
 #include <string>
-#define MIN_CARD 2
-#define MAX_CARD 14
+#include <vector>
 
-typedef enum {
-  Spades,
-  Hearts,
-  Clubs,
-  Diamonds
-}Suit;
+enum Suit { Spades, Hearts, Clubs, Diamonds };
+
+constexpr int SUIT_COUNT = 4;
+constexpr int LOWEST_RANK = 2;
+constexpr int JACK_RANK = 11;
+constexpr int ACE_RANK = 14;
 
 class Card {
-  public:
-    // RAII
-    Card();
-    Card(int, Suit);
-    ~Card();
+public:
+	Card() = default;
+	Card(int rank, Suit suit);
 
-    // Functions
-    int getRank() const;
-    Suit getSuit() const;
-    std::string toString() const;
+	int getRank() const { return rank; }
+	Suit getSuit() const { return suit; }
 
-  private:
-    // Variables
-    int rank;
-    Suit suit;
+	bool isRed() const;
+	std::string rankLabel() const;
+	std::string suitSymbol() const;
+	std::string toString() const;
+
+private:
+	int rank = 1;
+	Suit suit = Spades;
 };
 
-#endif
+using Cards = std::vector<Card>;
+
+std::vector<std::string> cardLabels(const Cards& cards);
+std::string formatCards(const Cards& cards);
+Cards combineCards(const Cards& first, const Cards& second);

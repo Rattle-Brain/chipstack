@@ -1,8 +1,5 @@
-#ifndef POKER_SCREEN_HPP
-#define POKER_SCREEN_HPP
+#pragma once
 
 struct GameConfig;
 
 bool runPokerScreen(const GameConfig& config);
-
-#endif

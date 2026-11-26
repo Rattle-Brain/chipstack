@@ -1,51 +1,41 @@
 #include "card.hpp"
+#include "core/common/text.hpp"
 
-Card::Card(){
-  Card::rank = 1;
-  Card::suit = Suit::Spades;
+Card::Card(int rank, Suit suit) : rank(rank), suit(suit) {}
+
+bool Card::isRed() const {
+	return suit == Hearts || suit == Diamonds;
 }
 
-Card::Card(int r, Suit s){
-  Card::rank = r;
-  Card::suit = s;
+std::string Card::rankLabel() const {
+	static const char* faceLabels[] = {"J", "Q", "K", "A"};
+	if (rank >= JACK_RANK) return faceLabels[rank - JACK_RANK];
+	return std::to_string(rank);
 }
 
-Card::~Card(){}
-
-int Card::getRank() const { return rank; }
-
-Suit Card::getSuit() const { return suit; }
+std::string Card::suitSymbol() const {
+	static const char* symbols[] = {"♠", "♥", "♣", "♦"};
+	return symbols[suit];
+}
 
 std::string Card::toString() const {
-  std::string suitChar;
-  std::string cardValue;
-    
-  switch(getSuit()) {
-    case Suit::Spades:
-      suitChar = "♠";
-      break;
-    case Suit::Clubs:
-      suitChar = "♣";
-      break;
-    case Suit::Hearts:
-      suitChar = "♥";
-      break;
-    case Suit::Diamonds:
-      suitChar = "♦";
-      break;
-  }
-  if(getRank() == 14){
-    cardValue = "A";
-  }else if(getRank() == 13){
-    cardValue = "K";
-  }else if(getRank() == 12){
-    cardValue = "Q";
-  }else if(getRank() == 11){
-    cardValue = "J";
-  } else {
-    cardValue = std::to_string(getRank());
-  }
-
-  return cardValue + suitChar;
+	return rankLabel() + suitSymbol();
 }
 
+std::vector<std::string> cardLabels(const Cards& cards) {
+	std::vector<std::string> labels;
+	for (const Card& card : cards) {
+		labels.push_back(card.toString());
+	}
+	return labels;
+}
+
+std::string formatCards(const Cards& cards) {
+	return join(cardLabels(cards), " ");
+}
+
+Cards combineCards(const Cards& first, const Cards& second) {
+	Cards combined = first;
+	combined.insert(combined.end(), second.begin(), second.end());
+	return combined;
+}

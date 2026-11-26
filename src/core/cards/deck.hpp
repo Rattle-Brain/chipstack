@@ -1,25 +1,20 @@
-#ifndef DECK_HPP
-#define DECK_HPP
+#pragma once
 
 #include "card.hpp"
-#include <cstddef>
-#include <cstdlib>
-
-#define DECK_SIZE 13*4
+#include <array>
+#include <random>
 
 class Deck {
-  public:
-    Deck();
-    virtual ~Deck();
-    Card deck[DECK_SIZE];
-    Card pullCard();
-    void shuffle(Card[]);
-    void resetIndex();
-    
-  private:
-    void initDeck(Card[]);
-    int random(int);
-    int index;
-};
+public:
+	static constexpr int SIZE = 52;
 
-#endif
+	Deck();
+	Card drawCard();
+	void shuffle();
+	void restack();
+
+private:
+	std::array<Card, SIZE> cards;
+	int topIndex = SIZE - 1;
+	std::mt19937 generator;
+};

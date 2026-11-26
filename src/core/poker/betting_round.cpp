@@ -1,259 +1,179 @@
 #include "betting_round.hpp"
+#include <algorithm>
 
-BettingRound::BettingRound(std::vector<PlayerSeat>& seats, int pot, int bigBlind,
-                           IGameObserver* observer,
-                           std::function<void(IPlayer*)> preActionCallback)
-    : seats(seats), currentBet(0), pot(pot), bigBlind(bigBlind),
-      observer_(observer), preActionCallback_(preActionCallback) {}
-
-int BettingRound::nextActiveIndex(int from) const {
-    int n = seats.size();
-    for (int i = 1; i <= n; i++) {
-        int idx = (from + i) % n;
-        if (seats[idx].state == PlayerHandState::Active) {
-            return idx;
-        }
-    }
-    return -1;
+static PokerObserver& observerOrSilent(PokerObserver* observer) {
+	static PokerObserver silentObserver;
+	return observer ? *observer : silentObserver;
 }
 
-int BettingRound::countActivePlayers() const {
-    int count = 0;
-    for (size_t i = 0; i < seats.size(); i++) {
-        if (seats[i].state == PlayerHandState::Active) count++;
-    }
-    return count;
+BettingRound::BettingRound(
+		PokerSeats& seats, int pot, Blinds blinds, PokerObserver* observer
+)
+		: seats(seats), observer(observerOrSilent(observer)), pot(pot),
+			blinds(blinds) {}
+
+int BettingRound::execute(
+		BettingRoundType type, const Cards& cards, int button, int startIndex
+) {
+	roundType = type;
+	communityCards = cards;
+	dealerButton = button;
+	resetRoundBets();
+	if (roundType == BettingRoundType::PreFlop) postBlinds();
+	runActions(startIndex % seats.size());
+	return pot;
 }
 
-int BettingRound::countNonFoldedPlayers() const {
-    int count = 0;
-    for (size_t i = 0; i < seats.size(); i++) {
-        if (seats[i].state != PlayerHandState::Folded &&
-            seats[i].state != PlayerHandState::SittingOut) {
-            count++;
-        }
-    }
-    return count;
+void BettingRound::resetRoundBets() {
+	betToMatch = 0;
+	for (PokerSeat& seat : seats) {
+		seat.roundBet = 0;
+	}
 }
 
-Position BettingRound::computePosition(int seatIndex, int dealerButton) const {
-    int n = seats.size();
-    int distance = (seatIndex - dealerButton + n) % n;
-
-    if (distance == 0) return Position::Dealer;
-    if (distance == 1) return Position::EarlyBlind;
-    if (distance == 2) return Position::EarlyBlind;
-
-    int playablePositions = n - 2;
-    if (playablePositions <= 0) return Position::Early;
-
-    int posInSequence = distance - 3;
-    int third = playablePositions / 3;
-    if (third == 0) third = 1;
-
-    if (posInSequence < third) return Position::Early;
-    if (posInSequence < third * 2) return Position::Middle;
-    return Position::Late;
+void BettingRound::postBlinds() {
+	int seatCount = seats.size();
+	bool headsUp = seatCount == 2;
+	int smallBlindIndex = headsUp ? dealerButton : (dealerButton + 1) % seatCount;
+	postBlind(smallBlindIndex, blinds.small, "small blind");
+	postBlind((smallBlindIndex + 1) % seatCount, blinds.big, "big blind");
 }
 
-BettingContext BettingRound::buildContext(int seatIndex, BettingRoundType roundType,
-                                         const std::vector<Card>& communityCards,
-                                         int dealerButton, int playersToAct) const {
-    BettingContext ctx;
-    ctx.roundType = roundType;
-    ctx.communityCards = communityCards;
-    ctx.pot = pot;
-    ctx.currentBet = currentBet;
-    ctx.playerCurrentBet = seats[seatIndex].currentBet;
-    ctx.costToCall = currentBet - seats[seatIndex].currentBet;
-    ctx.playerChips = seats[seatIndex].player->getChips();
-    ctx.numActivePlayers = countNonFoldedPlayers();
-    ctx.numPlayersToAct = playersToAct;
-    ctx.minRaise = bigBlind;
-    ctx.bigBlind = bigBlind;
-    ctx.dealerButton = dealerButton;
-    ctx.playerSeatIndex = seatIndex;
-    ctx.totalPlayers = seats.size();
-    ctx.position = computePosition(seatIndex, dealerButton);
-    return ctx;
+void BettingRound::postBlind(
+		int seatIndex, int amount, const std::string& blindName
+) {
+	PokerSeat& seat = seats[seatIndex];
+	int posted = commit(seat, amount);
+	observer.onBlindPosted(*seat.player, posted, blindName, pot);
 }
 
-PokerAction BettingRound::validateAction(PokerAction requested, const PlayerSeat& seat) const {
-    int costToCall = currentBet - seat.currentBet;
-    int chips = seat.player->getChips();
-
-    switch (requested.type) {
-        case ActionType::Check:
-            if (costToCall > 0) return PokerAction::fold();
-            break;
-        case ActionType::Call:
-            if (costToCall == 0) return PokerAction::check();
-            if (costToCall >= chips) return PokerAction::allIn();
-            break;
-        case ActionType::Raise:
-            if (requested.amount < currentBet + bigBlind) {
-                requested.amount = currentBet + bigBlind;
-            }
-            if (requested.amount >= chips + seat.currentBet) {
-                return PokerAction::allIn();
-            }
-            break;
-        case ActionType::AllIn:
-        case ActionType::Fold:
-            break;
-    }
-    return requested;
+void BettingRound::runActions(int startIndex) {
+	pendingAction.assign(seats.size(), false);
+	for (size_t i = 0; i < seats.size(); i++) {
+		pendingAction[i] = seats[i].isActive();
+	}
+	int seatIndex =
+			seats[startIndex].isActive() ? startIndex : nextActiveIndex(startIndex);
+	while (seatIndex >= 0 && needsAction(seatIndex)) {
+		takeTurn(seatIndex);
+		seatIndex = nextActiveIndex(seatIndex);
+	}
 }
 
-void BettingRound::applyAction(PlayerSeat& seat, PokerAction action) {
-    switch (action.type) {
-        case ActionType::Fold:
-            seat.state = PlayerHandState::Folded;
-            if (observer_) observer_->onPlayerAction(seat.player->getName(), "Fold", 0, pot, seat.player->getChips());
-            break;
-        case ActionType::Check:
-            if (observer_) observer_->onPlayerAction(seat.player->getName(), "Check", 0, pot, seat.player->getChips());
-            break;
-        case ActionType::Call: {
-            int costToCall = currentBet - seat.currentBet;
-            seat.player->placeBet(costToCall);
-            seat.currentBet = currentBet;
-            seat.totalInvested += costToCall;
-            pot += costToCall;
-            if (observer_) observer_->onPlayerAction(seat.player->getName(), "Call", costToCall, pot, seat.player->getChips());
-            break;
-        }
-        case ActionType::Raise: {
-            int totalForRound = action.amount;
-            int additional = totalForRound - seat.currentBet;
-            seat.player->placeBet(additional);
-            seat.currentBet = totalForRound;
-            seat.totalInvested += additional;
-            pot += additional;
-            currentBet = totalForRound;
-            if (observer_) observer_->onPlayerAction(seat.player->getName(), "Raise", totalForRound, pot, seat.player->getChips());
-            break;
-        }
-        case ActionType::AllIn: {
-            int chips = seat.player->getChips();
-            seat.player->placeBet(chips);
-            int totalForRound = seat.currentBet + chips;
-            seat.currentBet = totalForRound;
-            seat.totalInvested += chips;
-            pot += chips;
-            if (totalForRound > currentBet) {
-                currentBet = totalForRound;
-            }
-            seat.state = PlayerHandState::AllIn;
-            if (observer_) observer_->onPlayerAction(seat.player->getName(), "All-In", totalForRound, pot, seat.player->getChips());
-            break;
-        }
-    }
+bool BettingRound::needsAction(int seatIndex) const {
+	if (!pendingAction[seatIndex] || countSeatsInHand(seats) <= 1) return false;
+	bool facingBet = seats[seatIndex].roundBet < betToMatch;
+	return countActiveSeats(seats) > 1 || facingBet;
 }
 
-int BettingRound::execute(BettingRoundType roundType,
-                          const std::vector<Card>& communityCards,
-                          int dealerButton, int startIndex) {
-    int n = seats.size();
+void BettingRound::takeTurn(int seatIndex) {
+	PokerSeat& seat = seats[seatIndex];
+	int previousBet = betToMatch;
+	BettingContext context = buildContext(seatIndex);
+	observer.onBeforeDecision(*seat.player);
+	PokerAction requested = seat.player->decidePokerAction(context);
+	PokerAction applied = applyAction(seat, validateAction(requested, seat));
+	observer.onPlayerAction(*seat.player, applied, pot);
+	pendingAction[seatIndex] = false;
+	if (betToMatch > previousBet) reopenActionAfterRaise(seatIndex);
+}
 
-    for (size_t i = 0; i < seats.size(); i++) {
-        seats[i].currentBet = 0;
-    }
+void BettingRound::reopenActionAfterRaise(int raiserIndex) {
+	for (size_t i = 0; i < seats.size(); i++) {
+		if (static_cast<int>(i) != raiserIndex && seats[i].isActive()) {
+			pendingAction[i] = true;
+		}
+	}
+}
 
-    currentBet = 0;
+int BettingRound::commit(PokerSeat& seat, int amount) {
+	int committed = seat.commitChips(amount);
+	pot += committed;
+	betToMatch = std::max(betToMatch, seat.roundBet);
+	return committed;
+}
 
-    if (roundType == BettingRoundType::PreFlop) {
-        int sbIdx = (dealerButton + 1) % n;
-        int bbIdx = (dealerButton + 2) % n;
-        if (n == 2) {
-            sbIdx = dealerButton;
-            bbIdx = (dealerButton + 1) % n;
-        }
+PokerAction BettingRound::validateAction(
+		PokerAction requested, const PokerSeat& seat
+) const {
+	int costToCall = betToMatch - seat.roundBet;
+	int stack = seat.player->getChips();
+	switch (requested.type) {
+		case ActionType::Check:
+			return costToCall > 0 ? PokerAction::fold() : requested;
+		case ActionType::Call:
+			if (costToCall == 0) return PokerAction::check();
+			return costToCall >= stack ? PokerAction::allIn() : requested;
+		case ActionType::Raise: {
+			int raiseTo = std::max(requested.amount, betToMatch + blinds.big);
+			if (raiseTo >= stack + seat.roundBet) return PokerAction::allIn();
+			return PokerAction::raise(raiseTo);
+		}
+		default:
+			return requested;
+	}
+}
 
-        int sbAmount = bigBlind / 2;
-        int bbAmount = bigBlind;
+PokerAction BettingRound::applyAction(
+		PokerSeat& seat, const PokerAction& action
+) {
+	switch (action.type) {
+		case ActionType::Fold:
+			seat.state = SeatState::Folded;
+			return action;
+		case ActionType::Check:
+			return action;
+		case ActionType::Call:
+			return {ActionType::Call, commit(seat, betToMatch - seat.roundBet)};
+		case ActionType::Raise:
+			commit(seat, action.amount - seat.roundBet);
+			return {ActionType::Raise, seat.roundBet};
+		case ActionType::AllIn:
+			commit(seat, seat.player->getChips());
+			return {ActionType::AllIn, seat.roundBet};
+	}
+	return action;
+}
 
-        if (seats[sbIdx].player->getChips() <= sbAmount) {
-            sbAmount = seats[sbIdx].player->getChips();
-        }
-        seats[sbIdx].player->placeBet(sbAmount);
-        seats[sbIdx].currentBet = sbAmount;
-        seats[sbIdx].totalInvested += sbAmount;
-        pot += sbAmount;
+int BettingRound::nextActiveIndex(int fromIndex) const {
+	int seatCount = seats.size();
+	for (int offset = 1; offset <= seatCount; offset++) {
+		int index = (fromIndex + offset) % seatCount;
+		if (seats[index].isActive()) return index;
+	}
+	return -1;
+}
 
-        if (seats[bbIdx].player->getChips() <= bbAmount) {
-            bbAmount = seats[bbIdx].player->getChips();
-        }
-        seats[bbIdx].player->placeBet(bbAmount);
-        seats[bbIdx].currentBet = bbAmount;
-        seats[bbIdx].totalInvested += bbAmount;
-        pot += bbAmount;
+Position BettingRound::computePosition(int seatIndex) const {
+	int seatCount = seats.size();
+	int distance = (seatIndex - dealerButton + seatCount) % seatCount;
+	if (distance == 0) return Position::Dealer;
+	if (distance <= 2) return Position::EarlyBlind;
+	int playablePositions = seatCount - 2;
+	int third = std::max(1, playablePositions / 3);
+	int positionInOrder = distance - 3;
+	if (positionInOrder < third) return Position::Early;
+	if (positionInOrder < third * 2) return Position::Middle;
+	return Position::Late;
+}
 
-        currentBet = bbAmount;
-
-        if (observer_) {
-            observer_->onBlindsPosted(seats[sbIdx].player->getName(), sbAmount, "small blind", pot, seats[sbIdx].player->getChips());
-            observer_->onBlindsPosted(seats[bbIdx].player->getName(), bbAmount, "big blind", pot, seats[bbIdx].player->getChips());
-        }
-    }
-
-    if (countActivePlayers() <= 1) return pot;
-
-    std::vector<bool> needsToAct(n, false);
-    for (int i = 0; i < n; i++) {
-        if (seats[i].state == PlayerHandState::Active) {
-            needsToAct[i] = true;
-        }
-    }
-
-    int actingIdx = startIndex;
-    int safetyLimit = n * (n + 2);
-    int iterations = 0;
-
-    while (iterations++ < safetyLimit) {
-        if (seats[actingIdx].state != PlayerHandState::Active) {
-            int next = nextActiveIndex(actingIdx);
-            if (next < 0) break;
-            actingIdx = next;
-            continue;
-        }
-
-        if (countActivePlayers() <= 1) break;
-        if (!needsToAct[actingIdx]) break;
-
-        int playersAfter = 0;
-        int tempIdx = actingIdx;
-        for (int i = 0; i < n - 1; i++) {
-            tempIdx = (tempIdx + 1) % n;
-            if (seats[tempIdx].state == PlayerHandState::Active) {
-                playersAfter++;
-            }
-        }
-
-        BettingContext ctx = buildContext(actingIdx, roundType, communityCards,
-                                         dealerButton, playersAfter);
-        int prevBet = currentBet;
-
-        if (preActionCallback_) preActionCallback_(seats[actingIdx].player);
-
-        PokerAction action = seats[actingIdx].player->decideAction(ctx);
-        action = validateAction(action, seats[actingIdx]);
-        applyAction(seats[actingIdx], action);
-        needsToAct[actingIdx] = false;
-
-        bool raisedBet = (currentBet > prevBet);
-        if (raisedBet) {
-            for (int i = 0; i < n; i++) {
-                if (i != actingIdx && seats[i].state == PlayerHandState::Active) {
-                    needsToAct[i] = true;
-                }
-            }
-        }
-
-        int nextIdx = nextActiveIndex(actingIdx);
-        if (nextIdx < 0) break;
-        actingIdx = nextIdx;
-    }
-
-    return pot;
+BettingContext BettingRound::buildContext(int seatIndex) const {
+	const PokerSeat& seat = seats[seatIndex];
+	BettingContext context;
+	context.roundType = roundType;
+	context.communityCards = communityCards;
+	context.pot = pot;
+	context.currentBet = betToMatch;
+	context.playerCurrentBet = seat.roundBet;
+	context.costToCall = betToMatch - seat.roundBet;
+	context.playerChips = seat.player->getChips();
+	context.numActivePlayers = countSeatsInHand(seats);
+	context.numPlayersToAct = countActiveSeats(seats) - 1;
+	context.minRaise = blinds.big;
+	context.bigBlind = blinds.big;
+	context.dealerButton = dealerButton;
+	context.playerSeatIndex = seatIndex;
+	context.totalPlayers = seats.size();
+	context.position = computePosition(seatIndex);
+	return context;
 }
