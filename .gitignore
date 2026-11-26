@@ -1,0 +1,27 @@
+# Build output (out-of-source builds go here — see README)
+build/
+bin/
+lib/
+_deps/
+
+# CMake generated files — only appear after an in-source build (`cmake .`).
+# Ignored as a safety net; prefer `cmake -S . -B build`.
+/CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+/Makefile
+CTestTestfile.cmake
+Testing/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+install_manifest.txt
+*_include.cmake
+*_discovery.cmake
+*_tests.cmake
+cmake_test_discovery_*.json
+
+# Tooling
+compile_commands.json
+.cache/
