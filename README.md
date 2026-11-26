@@ -1,4 +1,8 @@
-# chipstack
+# Chipstack
+
+<div align="center">
+<img src="media/Chipstack.svg" alt="CHIPSTACK" width="420">
+</div>
 
 A terminal casino (poker and blackjack) written in C++17 with an [FTXUI](https://github.com/ArthurSonzogni/FTXUI) interface.
 
